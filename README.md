@@ -1,6 +1,6 @@
 # Must → Bingers Converter
 
-Converts your Must watch history into a Trakt-compatible export that can be imported into Bingers.
+Converts your Must watch history, ratings, and Want list into exports that can be imported into Bingers.
 
 ## 1. Export your Must data
 
@@ -48,18 +48,26 @@ The script will:
 - Read movies and shows from `mustapp.xlsx`
 - Match them with TMDB
 - Reconstruct watched TV episodes
-- Generate a Trakt-compatible export
-- Create `trakt-export.zip`
+- Transfer movie and show ratings through the Trakt export; Bingers converts them to its star scale
+- Add entries from the `Want` sheet to the Bingers library as not started
+- Add watched movies and shows to the Bingers library independently from their Trakt watch history
+- Create `trakt-export.zip` for watched history and ratings
+- Create `bingers-library.zip` for the Bingers library/bookmarks
+- Remove the temporary output folders after the ZIP files are created
+
+Import the ZIP files into Bingers separately, in the order shown below. The library archive uses the TV Time Out format to create the list/bookmark state; the Trakt archive preserves watched status and ratings.
 
 ## 6. Import into Bingers
 
 Open Bingers and go to the import page.
 
-Select the Trakt import option and upload:
+Upload these archives one at a time:
 
 `trakt-export.zip`
 
-Bingers should detect the export and import your watch history.
+`bingers-library.zip`
+
+Bingers detects the source format from each archive. The Trakt archive contains both watched history and ratings.
 
 ## Important
 

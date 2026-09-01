@@ -8,7 +8,7 @@ const path = require("path");
 // CONFIG
 // =====================================================
 
-const TMDB_API_KEY = "YOUR_TMDB_API_KEY";
+const TMDB_API_KEY = "eb4a12294b26b9623b2a9196ec8f5f0b";
 
 const INPUT_FILE = "mustapp.xlsx";
 
@@ -81,6 +81,22 @@ function getYear(value) {
   }
 
   return date.getUTCFullYear();
+}
+
+function getMustRating(value, title) {
+  if (value === "" || value === null || value === undefined) {
+    return null;
+  }
+
+  const rating = Number(value);
+
+  if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+    throw new Error(
+      `${title}: invalid Must rating "${value}"; expected an integer from 1 to 10.`
+    );
+  }
+
+  return rating;
 }
 
 function sleep(ms) {
@@ -201,6 +217,91 @@ async function findShow(title, year) {
   return show;
 }
 
+function getSearchResultTitle(item) {
+  return normalizeTitle(item.title || item.name);
+}
+
+function getSearchResultYear(item) {
+  const date = item.release_date || item.first_air_date;
+
+  if (!date) return undefined;
+
+  const year = Number(String(date).slice(0, 4));
+  return Number.isFinite(year) ? year : undefined;
+}
+
+function selectBestWatchlistResult(results, title, year) {
+  const mediaResults = (results || []).filter(
+    (item) =>
+      item.media_type === "movie" ||
+      item.media_type === "tv"
+  );
+
+  if (!mediaResults.length) {
+    return null;
+  }
+
+  const normalizedTitle = normalizeTitle(title).toLowerCase();
+  const exactTitleResults = mediaResults.filter(
+    (item) =>
+      getSearchResultTitle(item).toLowerCase() ===
+      normalizedTitle
+  );
+
+  if (year) {
+    const exactYearAndTitle = exactTitleResults.find(
+      (item) => getSearchResultYear(item) === Number(year)
+    );
+
+    if (exactYearAndTitle) {
+      return exactYearAndTitle;
+    }
+
+    const exactYear = mediaResults.find(
+      (item) => getSearchResultYear(item) === Number(year)
+    );
+
+    if (exactYear) {
+      return exactYear;
+    }
+  }
+
+  return exactTitleResults[0] || mediaResults[0];
+}
+
+async function findWatchlistItem(title, year) {
+  console.log(
+    `Searching watchlist item: ${title} (${year || "?"})`
+  );
+
+  const response = await tmdb.get("/search/multi", {
+    params: {
+      query: title,
+    },
+  });
+
+  const item = selectBestWatchlistResult(
+    response.data.results,
+    title,
+    year
+  );
+
+  if (!item) {
+    const error = new Error(
+      `Watchlist item not found in TMDB: ${title}`
+    );
+
+    error.code = "TMDB_WATCHLIST_NOT_FOUND";
+    throw error;
+  }
+
+  console.log(
+    `  -> ${getSearchResultTitle(item)} (${getSearchResultYear(item) || "?"}), ${item.media_type.toUpperCase()}, TMDB=${item.id}`
+  );
+
+  return item;
+}
+
 async function getShowDetails(tmdbId) {
   const response = await tmdb.get(`/tv/${tmdbId}`);
   return response.data;
@@ -209,6 +310,14 @@ async function getShowDetails(tmdbId) {
 async function getTvExternalIds(tmdbId) {
   const response = await tmdb.get(
     `/tv/${tmdbId}/external_ids`
+  );
+
+  return response.data;
+}
+
+async function getMovieExternalIds(tmdbId) {
+  const response = await tmdb.get(
+    `/movie/${tmdbId}/external_ids`
   );
 
   return response.data;
@@ -229,6 +338,7 @@ async function getSeason(tmdbId, seasonNumber) {
 async function main() {
   if (
     !TMDB_API_KEY ||
+    TMDB_API_KEY === "YOUR_TMDB_API_KEY" ||
     TMDB_API_KEY === "ВСТАВЬ_СЮДА_СВОЙ_TMDB_API_KEY"
   ) {
     throw new Error(
@@ -268,11 +378,25 @@ async function main() {
     }
   );
 
+  const wantRows = workbook.Sheets["Want"]
+    ? XLSX.utils.sheet_to_json(
+        workbook.Sheets["Want"],
+        {
+          raw: true,
+          defval: "",
+        }
+      )
+    : [];
+
   const movies = watchedRows.filter((row) =>
     normalizeTitle(row.Title)
   );
 
   const shows = showRows.filter((row) =>
+    normalizeTitle(row.Title)
+  );
+
+  const wantItems = wantRows.filter((row) =>
     normalizeTitle(row.Title)
   );
 
@@ -282,11 +406,29 @@ async function main() {
   console.log("==============================");
   console.log(`Movies: ${movies.length}`);
   console.log(`Shows:  ${shows.length}`);
+  console.log(`Want:   ${wantItems.length}`);
   console.log("");
 
   const watchedMovies = [];
   const watchedShows = [];
   const watchHistory = [];
+  const ratedShows = [];
+  const ratedMovies = [];
+  const traktWatchlist = new Map();
+  const skippedWantItems = [];
+
+  function addToTraktWatchlist(type, media, listedAt) {
+    const key = `${type}:${media.ids.tmdb || media.ids.imdb || media.title}`;
+
+    if (!traktWatchlist.has(key)) {
+      traktWatchlist.set(key, {
+        listed_at: listedAt,
+        notes: null,
+        type,
+        [type]: media,
+      });
+    }
+  }
 
   // =====================================================
   // MOVIES
@@ -298,12 +440,14 @@ async function main() {
     const title = normalizeTitle(row.Title);
     const year = getYear(row["Release date"]);
     const watchedAt = toISOString(row.Modified);
+    const rating = getMustRating(row.Rating, title);
 
     console.log(
       `[MOVIE ${i + 1}/${movies.length}] ${title}`
     );
 
     const movie = await findMovie(title, year);
+    const externalIds = await getMovieExternalIds(movie.id);
 
     const resolvedYear = movie.release_date
       ? Number(movie.release_date.slice(0, 4))
@@ -321,7 +465,7 @@ async function main() {
         ids: {
           trakt: null,
           slug: null,
-          imdb: null,
+          imdb: externalIds.imdb_id || null,
           tmdb: Number(movie.id),
         },
       },
@@ -340,11 +484,43 @@ async function main() {
         ids: {
           trakt: null,
           slug: null,
-          imdb: null,
+          imdb: externalIds.imdb_id || null,
           tmdb: Number(movie.id),
         },
       },
     });
+
+    addToTraktWatchlist(
+      "movie",
+      {
+        title: movie.title,
+        year: resolvedYear || null,
+        ids: {
+          trakt: null,
+          slug: null,
+          imdb: externalIds.imdb_id || null,
+          tmdb: Number(movie.id),
+        },
+      },
+      watchedAt
+    );
+
+    if (rating !== null) {
+      ratedMovies.push({
+        rated_at: watchedAt,
+        rating,
+        movie: {
+          title: movie.title,
+          year: resolvedYear || null,
+          ids: {
+            trakt: null,
+            slug: null,
+            imdb: externalIds.imdb_id || null,
+            tmdb: Number(movie.id),
+          },
+        },
+      });
+    }
 
     console.log("  Added.");
 
@@ -362,6 +538,7 @@ async function main() {
     const year = getYear(row["Release date"]);
     const watchedCount = Number(row.Watched) || 0;
     const watchedAt = toISOString(row.Modified);
+    const rating = getMustRating(row.Rating, title);
 
     console.log("");
     console.log(
@@ -507,9 +684,108 @@ async function main() {
       ),
     });
 
+    addToTraktWatchlist(
+      "show",
+      {
+        title: show.name,
+        year: resolvedYear || null,
+        ids: {
+          trakt: null,
+          slug: null,
+          tvdb: externalIds.tvdb_id
+            ? Number(externalIds.tvdb_id)
+            : null,
+          imdb: externalIds.imdb_id || null,
+          tmdb: Number(show.id),
+        },
+      },
+      watchedAt
+    );
+
+    if (rating !== null) {
+      ratedShows.push({
+        rated_at: watchedAt,
+        rating,
+        show: {
+          title: show.name,
+          year: resolvedYear || null,
+          ids: {
+            trakt: null,
+            slug: null,
+            tvdb: externalIds.tvdb_id
+              ? Number(externalIds.tvdb_id)
+              : null,
+            imdb: externalIds.imdb_id || null,
+            tmdb: Number(show.id),
+          },
+        },
+      });
+    }
+
     console.log(
       `  Added ${selectedEpisodes.length} episodes.`
     );
+
+    await sleep(100);
+  }
+
+  // =====================================================
+  // WANT / WATCHLIST
+  // =====================================================
+
+  for (let i = 0; i < wantItems.length; i++) {
+    const row = wantItems[i];
+    const title = normalizeTitle(row.Title);
+    const year = getYear(row["Release date"]);
+    const listedAt = toISOString(row.Modified);
+
+    console.log("");
+    console.log(
+      `[WANT ${i + 1}/${wantItems.length}] ${title}`
+    );
+
+    let item;
+
+    try {
+      item = await findWatchlistItem(title, year);
+    } catch (error) {
+      if (error.code !== "TMDB_WATCHLIST_NOT_FOUND") {
+        throw error;
+      }
+
+      skippedWantItems.push({ title, year });
+      console.warn(
+        `  Skipped: no matching movie or show in TMDB.`
+      );
+      await sleep(100);
+      continue;
+    }
+
+    const externalIds =
+      item.media_type === "tv"
+        ? await getTvExternalIds(item.id)
+        : await getMovieExternalIds(item.id);
+    const type = item.media_type === "tv" ? "show" : "movie";
+    const media = {
+      title: getSearchResultTitle(item),
+      year: getSearchResultYear(item) || year || null,
+      ids: {
+        trakt: null,
+        slug: null,
+        imdb: externalIds.imdb_id || null,
+        tmdb: Number(item.id),
+      },
+    };
+
+    if (type === "show") {
+      media.ids.tvdb = externalIds.tvdb_id
+        ? Number(externalIds.tvdb_id)
+        : null;
+    }
+
+    addToTraktWatchlist(type, media, listedAt);
+
+    console.log("  Added to watchlist.");
 
     await sleep(100);
   }
@@ -523,14 +799,28 @@ async function main() {
     force: true,
   });
 
-  const watchedDir = path.join(
-    OUT_DIR,
-    "watched"
-  );
-
-  fs.mkdirSync(watchedDir, {
+  fs.rmSync(path.join(__dirname, "bingers-library"), {
     recursive: true,
+    force: true,
   });
+
+  fs.rmSync(path.join(__dirname, "bingers-library.zip"), {
+    force: true,
+  });
+
+  fs.rmSync(path.join(__dirname, "bingers-ratings.zip"), {
+    force: true,
+  });
+
+  const watchedDir = path.join(OUT_DIR, "watched");
+  const ratingsDir = path.join(OUT_DIR, "ratings");
+  const listsDir = path.join(OUT_DIR, "lists");
+
+  for (const outputDir of [watchedDir, ratingsDir, listsDir]) {
+    fs.mkdirSync(outputDir, {
+      recursive: true,
+    });
+  }
 
   fs.writeFileSync(
     path.join(
@@ -559,6 +849,32 @@ async function main() {
   );
 
   fs.writeFileSync(
+    path.join(ratingsDir, "ratings-movies.json"),
+    JSON.stringify(ratedMovies, null, 2),
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(ratingsDir, "ratings-shows.json"),
+    JSON.stringify(ratedShows, null, 2),
+    "utf8"
+  );
+
+  const watchlistItems = Array.from(
+    traktWatchlist.values()
+  ).map((entry, index) => ({
+    rank: index + 1,
+    id: null,
+    ...entry,
+  }));
+
+  fs.writeFileSync(
+    path.join(listsDir, "lists-watchlist.json"),
+    JSON.stringify(watchlistItems, null, 2),
+    "utf8"
+  );
+
+  fs.writeFileSync(
     path.join(
       watchedDir,
       "watched-history-1.json"
@@ -580,13 +896,13 @@ async function main() {
   }
 
   const zip = new AdmZip();
-
-  zip.addLocalFolder(
-    watchedDir,
-    "watched"
-  );
-
+  zip.addLocalFolder(OUT_DIR);
   zip.writeZip(OUT_ZIP);
+
+  fs.rmSync(OUT_DIR, {
+    recursive: true,
+    force: true,
+  });
 
   console.log("");
   console.log("==============================");
@@ -601,22 +917,46 @@ async function main() {
   console.log(
     `History events: ${watchHistory.length}`
   );
+  console.log(`Movie ratings:  ${ratedMovies.length}`);
+  console.log(`Show ratings:   ${ratedShows.length}`);
+  console.log(`Watchlist:      ${watchlistItems.length}`);
+  console.log(
+    `Want skipped:   ${skippedWantItems.length}`
+  );
+
+  if (skippedWantItems.length) {
+    console.log("");
+    console.log("Skipped Want items:");
+
+    for (const item of skippedWantItems) {
+      console.log(
+        `  - ${item.title} (${item.year || "?"})`
+      );
+    }
+  }
+
   console.log("");
   console.log(`Created: ${OUT_ZIP}`);
 }
 
-main().catch((error) => {
-  console.error("");
-  console.error("==============================");
-  console.error("FATAL ERROR");
-  console.error("==============================");
+if (require.main === module) {
+  main().catch((error) => {
+    console.error("");
+    console.error("==============================");
+    console.error("FATAL ERROR");
+    console.error("==============================");
 
-  console.error(
-    error.response?.data ||
-      error.stack ||
-      error.message ||
-      error
-  );
+    console.error(
+      error.response?.data ||
+        error.stack ||
+        error.message ||
+        error
+    );
 
-  process.exit(1);
-});
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  selectBestWatchlistResult,
+};
