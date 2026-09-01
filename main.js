@@ -8,7 +8,7 @@ const path = require("path");
 // CONFIG
 // =====================================================
 
-const TMDB_API_KEY = "eb4a12294b26b9623b2a9196ec8f5f0b";
+const TMDB_API_KEY = "YOUR_TMDB_API_KEY";
 
 const INPUT_FILE = "mustapp.xlsx";
 
